@@ -18,4 +18,6 @@ Values of default parameters are same as proposed values in the paper.
 
 For the details about the method, please see the Shen's study.
 
+accuracy on test set:  0.966707477868  ambiguous accuracy on test:  0.93011416992
+
 [1] Shen,et. al. 2017. The Role of Context in Neural Morphological Disambiguation COLING 2016

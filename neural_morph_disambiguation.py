@@ -145,18 +145,18 @@ class MorphologicalDisambiguator(object):
         with open(file_path, 'r') as f:
             for line in f:
                 trimmed_line = line.decode("utf-8").strip(" \r\n\t")
-                if trimmed_line.startswith("<S>"):
+                if trimmed_line.startswith("<S>") or trimmed_line.startswith("<s>"):
                     sentence = []
-                elif trimmed_line.startswith("</S>"):
+                elif trimmed_line.startswith("</S>") or trimmed_line.startswith("</s>"):
                     if len(sentence) > 0:
                         sentences.append(sentence)
                         if len(sentences) > max_sentence:
                             return sentences
-                elif "<DOC>" in trimmed_line or trimmed_line.startswith("</DOC>") or trimmed_line.startswith(
+                elif len(trimmed_line) == 0 or "<DOC>" in trimmed_line or trimmed_line.startswith("</DOC>") or trimmed_line.startswith(
                         "<TITLE>") or trimmed_line.startswith("</TITLE>"):
                     pass
                 else:
-                    parses = trimmed_line.split(" ")
+                    parses = re.split(r"[\t ]", trimmed_line)
                     surface = parses[0]
                     analyzes = parses[1:]
                     roots = [self._get_root_from_analysis(analysis) for analysis in analyzes]
@@ -257,6 +257,7 @@ class MorphologicalDisambiguator(object):
         for epoch in xrange(num_epoch):
             random.shuffle(self.train)
             t3 = datetime.now()
+            count = 0
             for i, sentence in enumerate(self.train, 1):
                 t1 = datetime.now()
                 loss_exp = self.get_loss(sentence)
@@ -267,11 +268,11 @@ class MorphologicalDisambiguator(object):
                 if i > 0 and i % 100 == 0:  # print status
                     t2 = datetime.now()
                     delta = t2 - t1
-
                     print("loss = {}  /  {} instances finished in  {} seconds".format(epoch_loss / (i * 1.0), i, delta.seconds))
+                count = i
             t4 = datetime.now()
             delta = t4 - t3
-            print "epoch {} finished in {} minutes. loss = {}".format(epoch, delta.seconds / 60.0, epoch_loss / i * 1.0)
+            print "epoch {} finished in {} minutes. loss = {}".format(epoch, delta.seconds / 60.0, epoch_loss / count * 1.0)
             epoch_loss = 0
             acc, amb_acc = self.calculate_acc(self.dev)
             print " accuracy on dev set: ", acc, " ambiguous accuracy on dev: ", amb_acc
@@ -326,12 +327,18 @@ class MorphologicalDisambiguator(object):
         self.bwdRNN_context = dy.LSTMBuilder(1, word_lstm_rep_len, word_lstm_rep_len, self.model)
         self.model.populate("models/" + model_name + ".model")
 
+    @classmethod
+    def create_from_existed_model(cls, model_path):
+        return MorphologicalDisambiguator(train_from_scratch=False, model_file_name=model_path)
+
 if __name__ == "__main__":
-    morphological_disambiguator = MorphologicalDisambiguator()
-    #morphological_disambiguator = MorphologicalDisambiguator(train_from_scratch=False, model_file_name="model-15.10.2017")
-    #sent = morphological_disambiguator.sentence_from_str("Hazine hazine+Noun+A3sg+Pnon+Nom hazin+Adj^DB+Noun+Zero+A3sg+Pnon+Dat"
-    #                                              "Hazine+Noun+Prop+A3sg+Pnon+Nom\nMerkez'i "
-    #                                              "Merkez+Noun+Prop+A3sg+Pnon+Acc "
-    #                                              "Merkez+Noun+Prop+A3sg+P3sg+Nom\nrahatlattı "
-    #                                              "rahatla+Verb^DB+Verb+Caus+Pos+Past+A3sg")
-    #print " ".join(morphological_disambiguator.predict(sent))
+
+    disambiguator = MorphologicalDisambiguator(train_from_scratch=True, char_representation_len=100, word_lstm_rep_len=200,
+               train_data_path="/home/eray/notebook/turkish-texts-analyzed.singleline/unsupervised_data/all.txt", dev_data_path=None,
+               test_data_path="data/data.test.txt", model_file_name=None)
+
+    # disambiguator = MorphologicalDisambiguator.create_from_existed_model("model-22.10.2017")
+    # print "Loading test data"
+    # test_sentences = disambiguator.load_data("data/Morph.Dis.Test.Hand.Labeled-20K.txt")
+    # print "Calculating Accuracy"
+    # print disambiguator.calculate_acc(test_sentences)
