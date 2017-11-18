@@ -73,26 +73,42 @@ class MorphologicalDisambiguator(object):
 
     def __init__(self, train_from_scratch=True, char_representation_len=100, word_lstm_rep_len=200,
                train_data_path="data/data.train.txt", dev_data_path="data/data.dev.txt",
-               test_data_path="data/data.test.txt", model_file_name=None):
+               test_data_path="data/data.test.txt", model_file_name=None, char2id=None, tag2id=None, train_itearative=False):
         assert word_lstm_rep_len % 2 == 0
         if train_from_scratch:
             assert train_data_path
             assert test_data_path
-            print "Loading data..."
-            self.test = self.load_data(test_data_path)
-            self.train = self.load_data(train_data_path)
+            if not train_itearative:
+                print "Loading data..."
+                self.test = self.load_data(test_data_path)
+                self.train = self.load_data(train_data_path)
+            else:
+                self.test = self.load_data(test_data_path)
             if dev_data_path:
                 self.dev = self.load_data(dev_data_path)
             else:
                 self.dev = None
-            print "Creating Vocabulary..."
-            self.char2id_surface, self.char2id_root = self._create_vocab_chars(self.train)
-            self.surface_word2id, self.root2id, self.tag2id = self._create_vocab_words(self.train)
-            if not self.dev:
+
+            print "Creating or Loading Vocabulary..."
+            if char2id:
+                self.char2id_surface = char2id
+                self.char2id_root = char2id
+            else:
+                self.char2id_surface, self.char2id_root = self._create_vocab_chars(self.train)
+            if tag2id:
+                self.tag2id = tag2id
+                self.surface_word2id = None
+                self.root2id = None
+            else:
+                self.surface_word2id, self.root2id, self.tag2id = self._create_vocab_words(self.train)
+
+            if not self.dev and not train_itearative:
                 train_size = int(math.floor(0.99 * len(self.train)))
                 self.dev = self.train[train_size:]
                 self.train = self.train[:train_size]
-            # self.dev = self.train
+            if train_itearative and not self.dev:
+                self.dev = None
+
             self.model = dy.Model()
             self.trainer = dy.AdamTrainer(self.model)
             self.SURFACE_CHARS_LOOKUP = self.model.add_lookup_parameters(
@@ -108,7 +124,10 @@ class MorphologicalDisambiguator(object):
             self.bwdRNN_tag = dy.LSTMBuilder(1, char_representation_len, word_lstm_rep_len / 2, self.model)
             self.fwdRNN_context = dy.LSTMBuilder(1, word_lstm_rep_len, word_lstm_rep_len, self.model)
             self.bwdRNN_context = dy.LSTMBuilder(1, word_lstm_rep_len, word_lstm_rep_len, self.model)
-            self.train_model()
+            if train_itearative:
+                self.iterative_training(train_data_path)
+            else:
+                self.train_model()
         else:
             print "Loading Pre-Trained Model"
             assert model_file_name
@@ -164,6 +183,7 @@ class MorphologicalDisambiguator(object):
                     current_word = self.WordStruct(surface, roots, tags)
                     sentence.append(current_word)
         return sentences
+
 
     def propogate(self, sentence):
         dy.renew_cg()
@@ -251,7 +271,79 @@ class MorphologicalDisambiguator(object):
             total += len(sentence)
         return (corrects * 1.0 / total), ((corrects - non_ambigious_count) * 1.0 / (total - non_ambigious_count))
 
-    def train_model(self, model_name="model", early_stop=False, num_epoch=20):
+    def iterative_training(self, train_data_path, batch_size=200, notify_size=200, model_name="model", early_stop=False, num_epoch=4, train_dev_ratio=5):
+        max_acc = 0.0
+        epoch_loss = 0
+        for epoch in xrange(num_epoch):
+            t1 = datetime.now()
+            count = 1
+            with open(train_data_path, "r") as f:
+                sentences = []
+                for line in f:
+                    trimmed_line = line.decode("utf-8").strip(" \r\n\t")
+                    if trimmed_line.startswith("<S>") or trimmed_line.startswith("<s>"):
+                        sentence = []
+                    elif trimmed_line.startswith("</S>") or trimmed_line.startswith("</s>"):
+                        if count % batch_size == 0 and len(sentences) > 0:
+                            random.shuffle(sentences)
+                            if count / batch_size == train_dev_ratio and not self.dev:
+                                print "Calculating Accuracy on dev set"
+                                print self.calculate_acc(sentences)
+                            else:
+                                for i, s in enumerate(sentences):
+                                    loss_exp = self.get_loss(s)
+                                    cur_loss = loss_exp.scalar_value()
+                                    epoch_loss += cur_loss
+                                    loss_exp.backward()
+                                    self.trainer.update()
+                                    if i > 0 and i % 100 == 0:  # print status
+                                        t2 = datetime.now()
+                                        delta = t2 - t1
+                                        print("loss = {}  /  {} instances finished in  {} seconds".
+                                              format(epoch_loss / (count - (batch_size - i) * 1.0),
+                                                     count - (batch_size - i), delta.seconds))
+                            sentences = []
+                        if count % notify_size == 0:
+                            if self.dev:
+                                print "Calculating Accuracy on dev set"
+                                print self.calculate_acc(self.dev)
+                            else:
+                                print "Calculating Accuracy on test set"
+                                print self.calculate_acc(self.test)
+                        if len(sentence) > 0:
+                            sentences.append(sentence)
+                            count += 1
+                    elif len(trimmed_line) == 0 or "<DOC>" in trimmed_line or trimmed_line.startswith(
+                            "</DOC>") or trimmed_line.startswith(
+                            "<TITLE>") or trimmed_line.startswith("</TITLE>"):
+                        pass
+                    else:
+                        parses = re.split(r"[\t ]", trimmed_line)
+                        surface = parses[0]
+                        analyzes = parses[1:]
+                        roots = [self._get_root_from_analysis(analysis) for analysis in analyzes]
+                        tags = [self._get_tags_from_analysis(analysis) for analysis in analyzes]
+                        current_word = self.WordStruct(surface, roots, tags)
+                        sentence.append(current_word)
+            t4 = datetime.now()
+            delta = t4 - t1
+            print "epoch {} finished in {} minutes. loss = {}".format(epoch, delta.seconds / 60.0, epoch_loss / count * 1.0)
+            epoch_loss = 0
+            acc, amb_acc = self.calculate_acc(self.dev)
+            print " accuracy on dev set: ", acc, " ambiguous accuracy on dev: ", amb_acc
+            if acc > max_acc:
+                max_acc = acc
+                print "Max accuracy increased = {}, saving model...".format(str(max_acc))
+                self.save_model(model_name)
+            elif early_stop and max_acc - acc > 0.05:
+                print "Max accuracy did not incrase, early stopping!"
+                break
+
+        acc, amb_acc = self.calculate_acc(self.test)
+        print " accuracy on test set: ", acc, " ambiguous accuracy on test: ", amb_acc
+
+
+    def train_model(self, model_name="model", early_stop=False, num_epoch=4):
         max_acc = 0.0
         epoch_loss = 0
         for epoch in xrange(num_epoch):
@@ -259,7 +351,6 @@ class MorphologicalDisambiguator(object):
             t3 = datetime.now()
             count = 0
             for i, sentence in enumerate(self.train, 1):
-                t1 = datetime.now()
                 loss_exp = self.get_loss(sentence)
                 cur_loss = loss_exp.scalar_value()
                 epoch_loss += cur_loss
@@ -269,6 +360,7 @@ class MorphologicalDisambiguator(object):
                     t2 = datetime.now()
                     delta = t2 - t1
                     print("loss = {}  /  {} instances finished in  {} seconds".format(epoch_loss / (i * 1.0), i, delta.seconds))
+                    t1 = datetime.now()
                 count = i
             t4 = datetime.now()
             delta = t4 - t3
@@ -331,14 +423,29 @@ class MorphologicalDisambiguator(object):
     def create_from_existed_model(cls, model_path):
         return MorphologicalDisambiguator(train_from_scratch=False, model_file_name=model_path)
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":
+    char2id = None
+    tag2id = None
+    with open("defaultdic/char2id", "r") as f:
+        char2id = pickle.load(f)
+    with open("defaultdic/tag2id", "r") as f:
+        tag2id = pickle.load(f)
     disambiguator = MorphologicalDisambiguator(train_from_scratch=True, char_representation_len=100, word_lstm_rep_len=200,
-               train_data_path="/home/eray/notebook/turkish-texts-analyzed.singleline/unsupervised_data/all.txt", dev_data_path=None,
-               test_data_path="data/data.test.txt", model_file_name=None)
+               train_data_path="data/all.txt",
+               test_data_path="data/data.test.txt", model_file_name=None, char2id=char2id, tag2id=tag2id, train_itearative=True)
+
 
     # disambiguator = MorphologicalDisambiguator.create_from_existed_model("model-22.10.2017")
     # print "Loading test data"
-    # test_sentences = disambiguator.load_data("data/Morph.Dis.Test.Hand.Labeled-20K.txt")
-    # print "Calculating Accuracy"
-    # print disambiguator.calculate_acc(test_sentences)
+    test_sentences = disambiguator.load_data("data/Morph.Dis.Test.Hand.Labeled-20K.txt")
+    print "Calculating Accuracy on Morph.Dis.Test.Hand.Labeled-20K.txt"
+    print disambiguator.calculate_acc(test_sentences)
+
+    test_sentences = disambiguator.load_data("data/test.merge")
+    print "Calculating Accuracy on test.merge"
+    print disambiguator.calculate_acc(test_sentences)
+
+    test_sentences = disambiguator.load_data("data/data.test.txt")
+    print "Calculating Accuracy on data.test.txt"
+    print disambiguator.calculate_acc(test_sentences)
