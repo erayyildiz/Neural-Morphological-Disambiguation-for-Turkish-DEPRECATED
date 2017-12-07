@@ -73,22 +73,22 @@ class MorphologicalDisambiguator(object):
 
     def __init__(self, train_from_scratch=True, char_representation_len=100, word_lstm_rep_len=200,
                train_data_path="data/data.train.txt", dev_data_path="data/data.dev.txt",
-               test_data_path="data/data.test.txt", model_file_name=None, char2id=None, tag2id=None, train_itearative=False):
+               test_data_paths=["data/data.test.txt"], model_file_name=None, char2id=None, tag2id=None, train_itearative=False):
         assert word_lstm_rep_len % 2 == 0
         if train_from_scratch:
             assert train_data_path
-            assert test_data_path
+            assert len(test_data_paths) > 0
+            print "Loading data..."
             if not train_itearative:
-                print "Loading data..."
-                self.test = self.load_data(test_data_path)
                 self.train = self.load_data(train_data_path)
-            else:
-                self.test = self.load_data(test_data_path)
             if dev_data_path:
                 self.dev = self.load_data(dev_data_path)
             else:
                 self.dev = None
-
+            self.test_paths = test_data_paths
+            self.tests = []
+            for test_path in self.test_paths:
+                self.tests.append(self.load_data(test_path))
             print "Creating or Loading Vocabulary..."
             if char2id:
                 self.char2id_surface = char2id
@@ -131,6 +131,11 @@ class MorphologicalDisambiguator(object):
         else:
             print "Loading Pre-Trained Model"
             assert model_file_name
+            if char2id:
+                self.char2id_surface = char2id
+                self.char2id_root = char2id
+            if tag2id:
+                self.tag2id = tag2id
             self.load_model(model_file_name, char_representation_len, word_lstm_rep_len)
 
     def _get_tags_from_analysis(self, analysis):
@@ -271,7 +276,7 @@ class MorphologicalDisambiguator(object):
             total += len(sentence)
         return (corrects * 1.0 / total), ((corrects - non_ambigious_count) * 1.0 / (total - non_ambigious_count))
 
-    def iterative_training(self, train_data_path, batch_size=200, notify_size=200, model_name="model", early_stop=False, num_epoch=4, train_dev_ratio=5):
+    def iterative_training(self, train_data_path, batch_size=22850, notify_size=22850, model_name="model", early_stop=False, num_epoch=4, train_dev_ratio=20):
         max_acc = 0.0
         epoch_loss = 0
         for epoch in xrange(num_epoch):
@@ -306,10 +311,17 @@ class MorphologicalDisambiguator(object):
                         if count % notify_size == 0:
                             if self.dev:
                                 print "Calculating Accuracy on dev set"
-                                print self.calculate_acc(self.dev)
-                            else:
-                                print "Calculating Accuracy on test set"
-                                print self.calculate_acc(self.test)
+                                acc, amb_acc = self.calculate_acc(self.dev)
+                                print " accuracy: {}    ambiguous accuracy: {}".format(acc, amb_acc)
+                                if acc > max_acc:
+                                    max_acc = acc
+                                    print "Max accuracy increased = {}, saving model...".format(str(max_acc))
+                                    self.save_model(model_name)
+                            print "Calculating Accuracy on test sets"
+                            for q in range(len(self.test_paths)):
+                                print "Calculating Accuracy on test set: {}".format(self.test_paths[q])
+                                acc, amb_acc = self.calculate_acc(self.tests[q])
+                                print " accuracy: {}    ambiguous accuracy: {}".format(acc, amb_acc)
                         if len(sentence) > 0:
                             sentences.append(sentence)
                             count += 1
@@ -336,19 +348,21 @@ class MorphologicalDisambiguator(object):
                 print "Max accuracy increased = {}, saving model...".format(str(max_acc))
                 self.save_model(model_name)
             elif early_stop and max_acc - acc > 0.05:
-                print "Max accuracy did not incrase, early stopping!"
+                print "Max accuracy did not increase, early stopping!"
                 break
+            print "Calculating Accuracy on test sets"
+            for q in range(len(self.test_paths)):
+                print "Calculating Accuracy on test set: {}".format(self.test_paths[q])
+                acc, amb_acc = self.calculate_acc(self.tests[q])
+                print " accuracy: {}    ambiguous accuracy: {}".format(acc, amb_acc)
 
-        acc, amb_acc = self.calculate_acc(self.test)
-        print " accuracy on test set: ", acc, " ambiguous accuracy on test: ", amb_acc
 
-
-    def train_model(self, model_name="model", early_stop=False, num_epoch=4):
+    def train_model(self, model_name="model", early_stop=False, num_epoch=20):
         max_acc = 0.0
         epoch_loss = 0
         for epoch in xrange(num_epoch):
             random.shuffle(self.train)
-            t3 = datetime.now()
+            t1 = datetime.now()
             count = 0
             for i, sentence in enumerate(self.train, 1):
                 loss_exp = self.get_loss(sentence)
@@ -360,10 +374,9 @@ class MorphologicalDisambiguator(object):
                     t2 = datetime.now()
                     delta = t2 - t1
                     print("loss = {}  /  {} instances finished in  {} seconds".format(epoch_loss / (i * 1.0), i, delta.seconds))
-                    t1 = datetime.now()
                 count = i
-            t4 = datetime.now()
-            delta = t4 - t3
+            t2 = datetime.now()
+            delta = t2 - t1
             print "epoch {} finished in {} minutes. loss = {}".format(epoch, delta.seconds / 60.0, epoch_loss / count * 1.0)
             epoch_loss = 0
             acc, amb_acc = self.calculate_acc(self.dev)
@@ -376,8 +389,11 @@ class MorphologicalDisambiguator(object):
                 print "Max accuracy did not incrase, early stopping!"
                 break
 
-            acc, amb_acc = self.calculate_acc(self.test)
-            print " accuracy on test set: ", acc, " ambiguous accuracy on test: ", amb_acc
+            print "Calculating Accuracy on test sets"
+            for q in range(len(self.test_paths)):
+                print "Calculating Accuracy on test set: {}".format(self.test_paths[q])
+                acc, amb_acc = self.calculate_acc(self.tests[q])
+                print " accuracy: {}    ambiguous accuracy: {}".format(acc, amb_acc)
 
     def save_model(self, model_name):
         self.model.save("models/"+model_name+"-"+time.strftime("%d.%m.%Y")+".model")
@@ -387,22 +403,22 @@ class MorphologicalDisambiguator(object):
             pickle.dump(self.char2id_surface, f)
         with open("models/"+model_name+"-"+time.strftime("%d.%m.%Y")+".tag2id", "w") as f:
             pickle.dump(self.tag2id, f)
-        with open("models/"+model_name+"-"+time.strftime("%d.%m.%Y")+".root2id", "w") as f:
-            pickle.dump(self.root2id, f)
-        with open("models/"+model_name+"-"+time.strftime("%d.%m.%Y")+".surface_word2id", "w") as f:
-            pickle.dump(self.surface_word2id, f)
+        #with open("models/"+model_name+"-"+time.strftime("%d.%m.%Y")+".root2id", "w") as f:
+        #    pickle.dump(self.root2id, f)
+        #with open("models/"+model_name+"-"+time.strftime("%d.%m.%Y")+".surface_word2id", "w") as f:
+        #    pickle.dump(self.surface_word2id, f)
 
     def load_model(self, model_name, char_representation_len, word_lstm_rep_len):
         with open("models/"+model_name+".char2id_root", "r") as f:
             self.char2id_root = pickle.load(f)
-        with open("models/"+model_name+".char2id_surface", "r") as f:
+        with open("models/" + model_name + ".char2id_surface", "r") as f:
             self.char2id_surface = pickle.load(f)
         with open("models/"+model_name+".tag2id", "r") as f:
             self.tag2id = pickle.load(f)
-        with open("models/"+model_name+".root2id", "r") as f:
-            self.root2id = pickle.load(f)
-        with open("models/"+model_name+".surface_word2id", "r") as f:
-            self.surface_word2id = pickle.load(f)
+        #with open("models/"+model_name+".root2id", "r") as f:
+        #    self.root2id = pickle.load(f)
+        #with open("models/"+model_name+".surface_word2id", "r") as f:
+        #    self.surface_word2id = pickle.load(f)
         self.model = dy.Model()
         self.trainer = dy.AdamTrainer(self.model)
         self.SURFACE_CHARS_LOOKUP = self.model.add_lookup_parameters(
@@ -420,24 +436,35 @@ class MorphologicalDisambiguator(object):
         self.model.populate("models/" + model_name + ".model")
 
     @classmethod
-    def create_from_existed_model(cls, model_path):
-        return MorphologicalDisambiguator(train_from_scratch=False, model_file_name=model_path)
+    def create_from_existed_model(cls, model_path, char2id=None, tag2id=None):
+        return MorphologicalDisambiguator(train_from_scratch=False, model_file_name=model_path,
+                                          char2id=char2id, tag2id=tag2id)
 
 
 if __name__ == "__main__":
     char2id = None
     tag2id = None
-    with open("defaultdic/char2id", "r") as f:
-        char2id = pickle.load(f)
-    with open("defaultdic/tag2id", "r") as f:
-        tag2id = pickle.load(f)
-    disambiguator = MorphologicalDisambiguator(train_from_scratch=True, char_representation_len=100, word_lstm_rep_len=200,
-               train_data_path="data/all.txt",
-               test_data_path="data/data.test.txt", model_file_name=None, char2id=char2id, tag2id=tag2id, train_itearative=True)
+    #with open("defaultdic/char2id", "r") as f:
+    #    char2id = pickle.load(f)
+    #with open("defaultdic/tag2id", "r") as f:
+    #    tag2id = pickle.load(f)
+    #disambiguator = MorphologicalDisambiguator(train_from_scratch=True, char_representation_len=100, word_lstm_rep_len=200,
+    #           train_data_path="data/gt8.txt",
+    #           test_data_paths=["data/data.test.txt","data/test.merge","data/Morph.Dis.Test.Hand.Labeled-20K.txt"], model_file_name=None, char2id=char2id, tag2id=tag2id, train_itearative=True)
 
-
-    # disambiguator = MorphologicalDisambiguator.create_from_existed_model("model-22.10.2017")
-    # print "Loading test data"
+    #22.10.2017 -> best model
+    #22.11.2017 -> trained on unambiguous 200K fragments greater than 8
+    disambiguator = MorphologicalDisambiguator.create_from_existed_model("model-22.10.2017")
+    print "Loading data"
+    disambiguator.dev = disambiguator.load_data("data/data.dev.txt")
+    disambiguator.test_paths = ["data/data.test.txt","data/test.merge","data/Morph.Dis.Test.Hand.Labeled-20K.txt"]
+    disambiguator.tests = []
+    for test_path in disambiguator.test_paths:
+        disambiguator.tests.append(disambiguator.load_data(test_path))
+    #disambiguator.train = disambiguator.load_data("data/data.train.txt")
+    #print "Starting training..."
+    #disambiguator.train_model()
+    print "Loading test data"
     test_sentences = disambiguator.load_data("data/Morph.Dis.Test.Hand.Labeled-20K.txt")
     print "Calculating Accuracy on Morph.Dis.Test.Hand.Labeled-20K.txt"
     print disambiguator.calculate_acc(test_sentences)
