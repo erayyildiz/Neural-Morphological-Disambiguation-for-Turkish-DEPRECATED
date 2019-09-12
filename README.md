@@ -1,3 +1,5 @@
+> Deprecated: See the [current version](https://github.com/erayyildiz/neural-morphological-disambiguation) which is based on PyTorch.
+
 # Neural-Morphological-Disambiguation-for-Turkish
 
 This project is dynet implementation of morphological disambiguation method proposed in [1]
